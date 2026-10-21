@@ -3,10 +3,19 @@
     open: false,
     noClip: false,
     giftBoost: false,
-    progressBoost: false
+    progressBoost: false,
+    stabilize: true,
+    freezeGuard: false,
+    lastTick: performance.now()
   };
 
   const menuId = "snowRiderModMenu";
+  const SAFE_KEYS = [
+    "player", "sleigh", "controller", "physics", "movement", "rigidbody",
+    "transform", "velocity", "position", "progress", "present", "gift",
+    "coin", "score", "level", "health", "life", "dead", "crash", "gameover",
+    "paused", "isdead", "isdeadly", "collision", "hitbox"
+  ];
 
   function setMenuOpen(open) {
     state.open = open;
@@ -14,54 +23,46 @@
     if (menu) menu.style.display = open ? "block" : "none";
   }
 
-  function findGameObjects() {
-    const targets = [];
-
-    function walk(value, seen = new Set()) {
-      if (!value || typeof value !== "object") return;
-      if (seen.has(value)) return;
-      seen.add(value);
-
-      if (Array.isArray(value)) {
-        value.forEach(item => walk(item, seen));
-        return;
-      }
-
-      Object.keys(value).forEach((key) => {
-        const lower = key.toLowerCase();
-        if (
-          lower.includes("player") ||
-          lower.includes("sleigh") ||
-          lower.includes("controller") ||
-          lower.includes("movement") ||
-          lower.includes("physics") ||
-          lower.includes("progress") ||
-          lower.includes("present") ||
-          lower.includes("gift") ||
-          lower.includes("coin") ||
-          lower.includes("score") ||
-          lower.includes("level")
-        ) {
-          targets.push({ key, value: value[key] });
-        }
-        walk(value[key], seen);
-      });
+  function safeObjectKeys(obj) {
+    try {
+      return Object.keys(obj || {});
+    } catch (error) {
+      return [];
     }
-
-    walk(window);
-    return targets;
   }
 
-  function getBestTargets() {
-    const targets = findGameObjects();
-    const result = { player: null, progress: null, currency: null, physics: null };
+  function walkObjects(root, maxDepth = 3, depth = 0, seen = new Set()) {
+    if (!root || typeof root !== "object" || depth > maxDepth) return [];
+    if (seen.has(root)) return [];
+    seen.add(root);
 
-    targets.forEach(({ key, value }) => {
-      const lower = key.toLowerCase();
-      if (!result.player && (lower.includes("player") || lower.includes("sleigh") || lower.includes("controller"))) {
+    const hits = [];
+    const keys = safeObjectKeys(root);
+
+    for (const key of keys) {
+      const value = root[key];
+      const lower = String(key).toLowerCase();
+      if (value && typeof value === "object" && SAFE_KEYS.some(token => lower.includes(token))) {
+        hits.push({ key, value });
+      }
+      if (value && typeof value === "object") {
+        hits.push(...walkObjects(value, maxDepth, depth + 1, seen));
+      }
+    }
+
+    return hits;
+  }
+
+  function pickTargets() {
+    const hits = walkObjects(window, 3);
+    const result = { player: null, progress: null, currency: null, physics: null, health: null };
+
+    for (const { key, value } of hits) {
+      const lower = String(key).toLowerCase();
+      if (!result.player && (lower.includes("player") || lower.includes("sleigh") || lower.includes("controller") || lower.includes("rigidbody") || lower.includes("transform"))) {
         result.player = value;
       }
-      if (!result.physics && (lower.includes("physics") || lower.includes("movement"))) {
+      if (!result.physics && (lower.includes("physics") || lower.includes("movement") || lower.includes("velocity") || lower.includes("position"))) {
         result.physics = value;
       }
       if (!result.progress && (lower.includes("progress") || lower.includes("level") || lower.includes("score"))) {
@@ -70,77 +71,141 @@
       if (!result.currency && (lower.includes("present") || lower.includes("gift") || lower.includes("coin"))) {
         result.currency = value;
       }
-    });
+      if (!result.health && (lower.includes("health") || lower.includes("life") || lower.includes("dead") || lower.includes("gameover") || lower.includes("crash"))) {
+        result.health = value;
+      }
+    }
 
     return result;
   }
 
-  function applyNoClip() {
-    const { player, physics } = getBestTargets();
-    const candidates = [player, physics].filter(Boolean);
+  function setNumber(obj, key, value) {
+    if (!obj || typeof obj !== "object") return;
+    try {
+      obj[key] = value;
+    } catch (error) {
+      // no-op
+    }
+  }
 
-    candidates.forEach((target) => {
-      if (!target || typeof target !== "object") return;
+  function spoofDeathShield() {
+    const targets = pickTargets();
+    const candidates = [targets.player, targets.physics, targets.health].filter(Boolean);
+
+    for (const target of candidates) {
+      if (!target || typeof target !== "object") continue;
+
+      for (const key of safeObjectKeys(target)) {
+        const lower = String(key).toLowerCase();
+        if (
+          lower.includes("dead") ||
+          lower.includes("gameover") ||
+          lower.includes("crash") ||
+          lower.includes("fail") ||
+          lower.includes("hit") ||
+          lower.includes("collision") ||
+          lower.includes("hurt") ||
+          lower.includes("destroy") ||
+          lower.includes("ispaused")
+        ) {
+          try {
+            target[key] = false;
+          } catch (error) {
+            // no-op
+          }
+        }
+      }
+
+      if ("dead" in target) target.dead = false;
+      if ("isDead" in target) target.isDead = false;
+      if ("isGameOver" in target) target.isGameOver = false;
+      if ("gameOver" in target) target.gameOver = false;
+      if ("crashed" in target) target.crashed = false;
+      if ("canCollide" in target) target.canCollide = false;
+      if ("isGrounded" in target) target.isGrounded = true;
+      if ("colliderEnabled" in target) target.colliderEnabled = false;
+      if ("collisionEnabled" in target) target.collisionEnabled = false;
+      if ("isPaused" in target) target.isPaused = false;
+      if ("paused" in target) target.paused = false;
+      if ("timeScale" in target) target.timeScale = 1;
+      if ("speed" in target && typeof target.speed === "number") target.speed = Math.max(target.speed, 18);
+    }
+  }
+
+  function applyNoClip() {
+    const targets = pickTargets();
+    const candidates = [targets.player, targets.physics].filter(Boolean);
+
+    for (const target of candidates) {
+      if (!target || typeof target !== "object") continue;
 
       if ("gravity" in target) target.gravity = 0;
       if ("yVelocity" in target) target.yVelocity = 0;
       if ("velocityY" in target) target.velocityY = 0;
       if ("jumpForce" in target) target.jumpForce = 0;
+      if ("fallSpeed" in target) target.fallSpeed = 0;
+      if ("verticalSpeed" in target) target.verticalSpeed = 0;
       if ("canCollide" in target) target.canCollide = false;
       if ("isGrounded" in target) target.isGrounded = true;
       if ("colliderEnabled" in target) target.colliderEnabled = false;
+      if ("collisionEnabled" in target) target.collisionEnabled = false;
       if (target.position && typeof target.position === "object") {
         if (typeof target.position.y === "number") target.position.y = Number(target.position.y);
       }
-    });
+      if (target.transform && target.transform.position && typeof target.transform.position === "object") {
+        if (typeof target.transform.position.y === "number") target.transform.position.y = Number(target.transform.position.y);
+      }
+    }
+
+    spoofDeathShield();
   }
 
   function applyGiftBoost() {
-    const { progress, currency } = getBestTargets();
-    const targets = [progress, currency].filter(Boolean);
+    const targets = pickTargets();
+    const allTargets = [targets.progress, targets.currency].filter(Boolean);
 
-    targets.forEach((target) => {
-      if (!target || typeof target !== "object") return;
+    for (const target of allTargets) {
+      if (!target || typeof target !== "object") continue;
 
-      Object.keys(target).forEach((key) => {
-        const lower = key.toLowerCase();
+      for (const key of safeObjectKeys(target)) {
+        const lower = String(key).toLowerCase();
         if (lower.includes("present") || lower.includes("gift") || lower.includes("coin") || lower.includes("score")) {
           const value = Number(target[key]);
           if (!Number.isNaN(value)) target[key] = value + 500;
         }
-      });
-    });
+      }
+    }
 
     try {
-      const keyList = ["presents", "gifts", "coins"];
-      keyList.forEach((key) => {
+      const keys = ["presents", "gifts", "coins"];
+      for (const key of keys) {
         const current = Number(window.localStorage.getItem(key) || 0);
         window.localStorage.setItem(key, String(current + 500));
-      });
+      }
     } catch (error) {
-      // No-op when storage is blocked.
+      // no-op
     }
   }
 
   function grantProgress() {
     try {
-      const keyList = ["progress", "level", "score", "presents", "coins", "gifts"];
-      keyList.forEach((key) => {
+      const keys = ["progress", "level", "score", "presents", "coins", "gifts"];
+      for (const key of keys) {
         const current = Number(window.localStorage.getItem(key) || 0);
         window.localStorage.setItem(key, String(current + 1000));
-      });
+      }
     } catch (error) {
-      // No-op when storage is blocked.
+      // no-op
     }
 
-    const { progress, currency } = getBestTargets();
-    const targets = [progress, currency].filter(Boolean);
+    const targets = pickTargets();
+    const allTargets = [targets.progress, targets.currency].filter(Boolean);
 
-    targets.forEach((target) => {
-      if (!target || typeof target !== "object") return;
+    for (const target of allTargets) {
+      if (!target || typeof target !== "object") continue;
 
-      Object.keys(target).forEach((key) => {
-        const lower = key.toLowerCase();
+      for (const key of safeObjectKeys(target)) {
+        const lower = String(key).toLowerCase();
         if (
           lower.includes("progress") ||
           lower.includes("level") ||
@@ -152,8 +217,41 @@
           const value = Number(target[key]);
           if (!Number.isNaN(value)) target[key] = value + 1000;
         }
-      });
-    });
+      }
+    }
+  }
+
+  function stabilizeRuntime() {
+    if (!state.stabilize) return;
+
+    try {
+      const root = window;
+      const keys = safeObjectKeys(root);
+
+      for (const key of keys) {
+        const value = root[key];
+        const lower = String(key).toLowerCase();
+        if (value && typeof value === "object") {
+          if ("timeScale" in value) value.timeScale = 1;
+          if ("paused" in value) value.paused = false;
+          if ("isPaused" in value) value.isPaused = false;
+          if (lower.includes("loader") || lower.includes("game") || lower.includes("manager")) {
+            if ("timeScale" in value) value.timeScale = 1;
+          }
+        }
+      }
+
+      if (window.requestAnimationFrame) {
+        const now = performance.now();
+        if (state.freezeGuard && now - state.lastTick > 1200) {
+          document.body.style.filter = "none";
+          state.freezeGuard = false;
+        }
+        state.lastTick = now;
+      }
+    } catch (error) {
+      // no-op
+    }
   }
 
   function makeMenu() {
@@ -162,9 +260,9 @@
     menu.style.position = "fixed";
     menu.style.top = "20px";
     menu.style.right = "20px";
-    menu.style.width = "220px";
+    menu.style.width = "230px";
     menu.style.padding = "12px";
-    menu.style.background = "rgba(9, 13, 27, 0.9)";
+    menu.style.background = "rgba(9, 13, 27, 0.92)";
     menu.style.border = "1px solid rgba(255,255,255,0.2)";
     menu.style.borderRadius = "12px";
     menu.style.color = "#ffffff";
@@ -217,6 +315,7 @@
     addToggle("No Clip", (enabled) => {
       state.noClip = enabled;
       if (enabled) applyNoClip();
+      spoofDeathShield();
     });
 
     addToggle("More Presents", (enabled) => {
@@ -224,10 +323,15 @@
       if (enabled) applyGiftBoost();
     });
 
+    addToggle("Stabilize", (enabled) => {
+      state.stabilize = enabled;
+      if (enabled) stabilizeRuntime();
+    });
+
     const progressBtn = document.createElement("button");
     progressBtn.textContent = "Give More Progress";
     progressBtn.style.width = "100%";
-    progressBtn.style.marginTop = "6px";
+    progressBtn.style.marginTop = "8px";
     progressBtn.style.padding = "8px 10px";
     progressBtn.style.border = "none";
     progressBtn.style.borderRadius = "8px";
@@ -238,6 +342,7 @@
     progressBtn.onclick = () => {
       state.progressBoost = true;
       grantProgress();
+      spoofDeathShield();
     };
     menu.appendChild(progressBtn);
 
@@ -246,9 +351,22 @@
 
   function installHotkeys() {
     document.addEventListener("keydown", (event) => {
-      if (event.key.toLowerCase() === "m") {
+      const key = event.key.toLowerCase();
+      if (key === "m") {
         event.preventDefault();
         setMenuOpen(!state.open);
+      }
+      if (key === "h") {
+        event.preventDefault();
+        spoofDeathShield();
+        grantProgress();
+      }
+    });
+
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) {
+        stabilizeRuntime();
+        spoofDeathShield();
       }
     });
   }
@@ -259,6 +377,10 @@
     if (state.progressBoost) {
       grantProgress();
       state.progressBoost = false;
+    }
+    if (state.stabilize) {
+      stabilizeRuntime();
+      spoofDeathShield();
     }
   }
 
